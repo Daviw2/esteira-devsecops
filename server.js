@@ -16,3 +16,4 @@ app.get('/health', (req, res) => {
 app.listen(3000, () => {
   console.log('Servidor rodando na porta 3000');
 });
+const AWS_ACCESS_KEY_ID = "AKIAIMNOJVGFDXXXE4OA";
