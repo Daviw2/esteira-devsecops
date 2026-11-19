@@ -1,0 +1,95 @@
+name: Esteira DevSecOps Automatizada
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  devsecops-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Codigo
+        uses: actions/checkout@v4
+
+      # 1. Secret Scanning (Security Gate)
+      - name: 1. Secret Scanning (Gitleaks)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/src" \
+            zricethezav/gitleaks:latest detect \
+            --source="/src" --no-git --verbose --exit-code 1
+
+      # 2. SAST (Security Gate)
+      - name: 2. SAST - Analise Estatica de Codigo (Semgrep)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/src" \
+            semgrep/semgrep semgrep scan \
+            --config p/javascript --error /src
+
+      # Gera o package-lock.json para o Trivy mapear toda a arvore de dependencias
+      - name: Preparar Manifesto de Dependencias
+        run: npm install --package-lock-only
+
+      # 3. SCA & SBOM (Security Gate + Inventario CycloneDX)
+      - name: 3a. SCA - Vulnerabilidades em Dependencias (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: 3b. Gerar SBOM CycloneDX (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'cyclonedx'
+          output: 'sbom.cdx.json'
+
+      - name: Publicar Artefato SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+
+      # 4. IaC e Container Security (Security Gate)
+      - name: 4a. IaC Security - Dockerfile e Compose (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+
+      - name: 4b. Build da Imagem Docker
+        run: docker build -t api-devsecops:latest .
+
+      - name: 4c. Container Security - Imagem Final (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'api-devsecops:latest'
+          severity: 'CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      # 5. DAST (Teste Dinamico na API rodando em container)
+      - name: 5a. Subir Container Efemero para DAST
+        run: |
+          docker run -d --name api-dast -p 3000:3000 api-devsecops:latest
+          sleep 5
+          curl -f http://localhost:3000/health
+
+      - name: 5b. DAST - Analise Dinamica HTTP (OWASP ZAP)
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:3000'
+          allow_issue_writing: false
+          fail_action: false
